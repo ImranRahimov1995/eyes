@@ -48,14 +48,17 @@
         FOV: 50,
         NEAR: 0.1,
         FAR: 1000,
-        POSITION_Z: 6
+        POSITION_Z: 6,
+        POSITION_Z_MOBILE: 8
       },
       VIDEO: {
         WIDTH: 640,
-        HEIGHT: 480
+        HEIGHT: 480,
+        FACING_MODE: 'user' // Front camera for mobile
       },
       EYE: {
         SPACING: 2.8,
+        SPACING_MOBILE: 2.0,
         COLORS: {
           PRIMARY: 0xff0000,
           INNER_GLOW: 0xff3333,
@@ -63,6 +66,10 @@
         },
         OUTLINE_OPACITY: 0.3,
         BROW_OPACITY: 0.8
+      },
+      DEVICE: {
+        IS_MOBILE: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent),
+        TOUCH_ENABLED: 'ontouchstart' in window || navigator.maxTouchPoints > 0
       },
       PUPIL: {
         RADIUS: 0.25,
@@ -266,6 +273,10 @@
         return this.group;
       }
 
+      setScale(scale) {
+        this.group.scale.set(scale, scale, scale);
+      }
+
       setPupilPosition(x, y) {
         this.pupilGroup.position.set(x, y, 0);
       }
@@ -299,17 +310,36 @@
       }
 
       async setupCamera() {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { 
-            width: CONFIG.VIDEO.WIDTH, 
-            height: CONFIG.VIDEO.HEIGHT 
-          }
-        });
-        this.videoElement.srcObject = stream;
+        try {
+          const constraints = {
+            video: {
+              width: { ideal: CONFIG.VIDEO.WIDTH },
+              height: { ideal: CONFIG.VIDEO.HEIGHT },
+              facingMode: CONFIG.VIDEO.FACING_MODE
+            }
+          };
 
-        return new Promise((resolve) => {
-          this.videoElement.onloadedmetadata = () => resolve();
-        });
+          // Try with ideal constraints first
+          let stream;
+          try {
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+          } catch (err) {
+            // Fallback for older mobile devices
+            console.warn('Failed with ideal constraints, trying basic video');
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: CONFIG.VIDEO.FACING_MODE }
+            });
+          }
+
+          this.videoElement.srcObject = stream;
+
+          return new Promise((resolve) => {
+            this.videoElement.onloadedmetadata = () => resolve();
+          });
+        } catch (error) {
+          console.error('Camera setup failed:', error);
+          throw new Error('Unable to access camera. Please grant camera permissions.');
+        }
       }
 
       async detectFace() {
@@ -449,6 +479,7 @@
         this.camera = null;
         this.renderer = null;
         this.controls = null;
+        this.onResizeCallback = null;
         
         this.initialize();
       }
@@ -473,28 +504,45 @@
           CONFIG.CAMERA.NEAR,
           CONFIG.CAMERA.FAR
         );
-        this.camera.position.z = CONFIG.CAMERA.POSITION_Z;
+        // Adjust camera position based on device
+        const cameraZ = CONFIG.DEVICE.IS_MOBILE ? CONFIG.CAMERA.POSITION_Z_MOBILE : CONFIG.CAMERA.POSITION_Z;
+        this.camera.position.z = cameraZ;
       }
 
       createRenderer() {
-        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        this.renderer = new THREE.WebGLRenderer({ 
+          antialias: !CONFIG.DEVICE.IS_MOBILE, // Disable antialiasing on mobile for performance
+          powerPreference: 'high-performance'
+        });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         document.body.appendChild(this.renderer.domElement);
       }
 
       createControls() {
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableZoom = false;
+        this.controls.enableRotate = !CONFIG.DEVICE.IS_MOBILE; // Disable rotation on mobile
+        this.controls.enablePan = false;
       }
 
       setupEventListeners() {
         window.addEventListener('resize', () => this.handleResize());
       }
 
+      setResizeCallback(callback) {
+        this.onResizeCallback = callback;
+      }
+
       handleResize() {
         this.camera.aspect = window.innerWidth / window.innerHeight;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Optimize for mobile
+        
+        if (this.onResizeCallback) {
+          this.onResizeCallback();
+        }
       }
 
       addToScene(object) {
@@ -521,6 +569,8 @@
 
       async initialize() {
         this.createEyes();
+        this.updateEyeLayout();
+        this.sceneManager.setResizeCallback(() => this.updateEyeLayout());
         await this.setupFaceTracking();
         this.createAnimationController();
         this.start();
@@ -530,11 +580,72 @@
         this.leftEye = new Eye(true);
         this.rightEye = new Eye(false);
 
-        this.leftEye.getGroup().position.x = -CONFIG.EYE.SPACING;
-        this.rightEye.getGroup().position.x = CONFIG.EYE.SPACING;
-
         this.sceneManager.addToScene(this.leftEye.getGroup());
         this.sceneManager.addToScene(this.rightEye.getGroup());
+      }
+
+      updateEyeLayout() {
+        const aspect = window.innerWidth / window.innerHeight;
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        const isMobile = CONFIG.DEVICE.IS_MOBILE || aspect < 1;
+        
+        // Calculate responsive scale based on screen size
+        let scale = 1.0;
+        let spacing = CONFIG.EYE.SPACING;
+        
+        if (isMobile || aspect < 1.5) {
+          // For mobile and narrow screens
+          if (aspect < 0.5) {
+            // Very narrow screens (portrait phones)
+            scale = 0.4;
+            spacing = 1.3;
+          } else if (aspect < 0.7) {
+            // Narrow portrait phones
+            scale = 0.5;
+            spacing = 1.5;
+          } else if (aspect < 1) {
+            // Portrait tablets or wider phones
+            scale = 0.65;
+            spacing = 1.8;
+          } else if (aspect < 1.5) {
+            // Landscape mobile or narrow desktop
+            scale = 0.75;
+            spacing = 2.2;
+          }
+        } else {
+          // Desktop
+          if (aspect < 1.8) {
+            // Narrow desktop windows
+            scale = 0.85;
+            spacing = 2.5;
+          } else {
+            // Standard wide desktop
+            scale = 1.0;
+            spacing = 2.8;
+          }
+        }
+        
+        // Additional scaling based on absolute viewport size
+        if (width < 500) {
+          scale *= 0.7;
+          spacing *= 0.8;
+        } else if (width < 768) {
+          scale *= 0.8;
+          spacing *= 0.9;
+        }
+        
+        // Apply scale to eyes
+        this.leftEye.setScale(scale);
+        this.rightEye.setScale(scale);
+        
+        // Apply spacing - center horizontally
+        this.leftEye.getGroup().position.x = -spacing;
+        this.rightEye.getGroup().position.x = spacing;
+        
+        // Center vertically
+        this.leftEye.getGroup().position.y = 0;
+        this.rightEye.getGroup().position.y = 0;
       }
 
       async setupFaceTracking() {
